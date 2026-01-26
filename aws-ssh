@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# aws-ssh: SSH into the first instance returned by aws-list for a given argument
+# Usage: aws-ssh <search-term>
+
+if [ -z "$1" ]; then
+    echo "Usage: aws-ssh <search-term>"
+    exit 1
+fi
+
+instance_id=$(aws-list "$1" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
+
+if [ -z "$instance_id" ]; then
+    echo "No instance found for '$1'"
+    exit 2
+fi
+
+echo "Connecting to $instance_id..."
+ssh "$instance_id"

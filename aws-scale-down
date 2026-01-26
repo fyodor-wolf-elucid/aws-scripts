@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# Script to scale down AWS Auto Scaling groups to 0
+# Usage: aws-scale-down <env>
+# Example: aws-scale-down fyodor-wolf-elucid
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Error: Environment parameter required"
+    echo "Usage: aws-scale-down <env>"
+    echo "Example: aws-scale-down fyodor-wolf-elucid"
+    exit 1
+fi
+
+ENV=$1
+PROFILE="${AWS_PROFILE:-default}"
+
+echo "Fetching Auto Scaling groups with env tag: ${ENV}"
+echo "Looking for Attributes: proc-bg, proc-vc-inf, proc-render"
+echo ""
+
+# Get all ASGs and filter by tags
+ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups \
+    --profile "$PROFILE" \
+    --query "AutoScalingGroups[*].[AutoScalingGroupName, Tags[?Key=='env'].Value | [0], Tags[?Key=='Attributes'].Value | [0]]" \
+    --output text | \
+    awk -v env="$ENV" '$2 == env && ($3 == "proc-bg" || $3 == "proc-vc-inf" || $3 == "proc-render") {print $1}' | \
+    sort)
+
+if [ -z "$ASG_NAMES" ]; then
+    echo "No Auto Scaling groups found with:"
+    echo "  - env tag: ${ENV}"
+    echo "  - Attributes tag: proc-bg, proc-vc-inf, or proc-render"
+    exit 1
+fi
+
+echo "Found Auto Scaling groups:"
+echo "$ASG_NAMES"
+echo ""
+
+# Scale down each ASG
+for ASG_NAME in $ASG_NAMES; do
+    echo "Scaling down: $ASG_NAME"
+    aws autoscaling update-auto-scaling-group \
+        --profile "$PROFILE" \
+        --auto-scaling-group-name "$ASG_NAME" \
+        --min-size 0 \
+        --max-size 0 \
+        --desired-capacity 0
+
+    if [ $? -eq 0 ]; then
+        echo "✓ Successfully scaled down $ASG_NAME to 0"
+    else
+        echo "✗ Failed to scale down $ASG_NAME"
+    fi
+done
+
+echo ""
+echo "Scale down complete!"

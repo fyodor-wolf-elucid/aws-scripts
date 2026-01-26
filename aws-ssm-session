@@ -1,0 +1,83 @@
+#!/bin/bash
+
+# Script to connect to EC2 instances via AWS Systems Manager Session Manager
+# Usage: aws-ssm-session <instance_name> [--stage <stage>] [--attributes <attributes>]
+
+instance_name=""
+stage=""
+attributes="Attribute Manager"  # Default to Attribute Manager
+profile="${AWS_PROFILE:-default}"
+
+# Parse arguments
+while (( "$#" )); do
+    case "$1" in
+        --stage)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                stage="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --attributes)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                attributes="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            if [ -z "$instance_name" ]; then
+                instance_name="$1"
+            else
+                echo "Error: Multiple instance names provided" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$instance_name" ]; then
+    echo "Usage: aws-ssm-session <instance_name> [--stage <stage>] [--attributes <attributes>]"
+    echo "  Default attributes: 'Attribute Manager'"
+    exit 1
+fi
+
+# Check if AWS SSO session is active, if not, prompt for login
+if ! aws sts get-caller-identity --profile "$profile" &> /dev/null; then
+    echo "AWS SSO session not active. Please login."
+    aws sso login --profile "$profile"
+fi
+
+# Build filters array
+filters=("Name=tag:Name,Values=$instance_name" "Name=instance-state-name,Values=running")
+
+if [ -n "$stage" ]; then
+    filters+=("Name=tag:Stage,Values=$stage")
+fi
+
+if [ -n "$attributes" ]; then
+    filters+=("Name=tag:Attributes,Values=$attributes")
+fi
+
+instance_id=$(aws ec2 describe-instances \
+    --profile "$profile" \
+    --filters "${filters[@]}" \
+    --query 'Reservations[].Instances[0].InstanceId' \
+    --output text)
+
+if [ "$instance_id" = "None" ] || [ -z "$instance_id" ]; then
+    echo "Instance with name '$instance_name' not found or not running with the specified filters."
+    if [ -n "$stage" ]; then
+        echo "  Stage: $stage"
+    fi
+    echo "  Attributes: $attributes"
+    exit 1
+fi
+
+echo "Connecting to instance: $instance_name (ID: $instance_id)"
+aws ssm start-session --target "$instance_id" --profile "$profile"

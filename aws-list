@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Script to list AWS EC2 instances
+# Usage: aws-list [stage] [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+
+stage=""
+attributes="manager"
+profile="$AWS_PROFILE"
+stage_explicitly_set=false
+
+while (( "$#" )); do
+    case "$1" in
+        --profile)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                profile="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --stage)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                stage="$2"
+                stage_explicitly_set=true
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --attributes)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                attributes="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            if [ "$stage_explicitly_set" = false ] && [ -z "$stage" ]; then
+                stage="$1"
+            else
+                echo "Error: Unknown argument $1" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+filters=("Name=instance-state-name,Values=running")
+
+if [ -n "$stage" ]; then
+    filters+=("Name=tag:Stage,Values=$stage")
+fi
+
+filters+=("Name=tag:Attributes,Values=$attributes")
+
+aws ec2 describe-instances --profile "$profile" \
+    --filters "${filters[@]}" \
+    --query 'Reservations[].Instances[].{Name:Tags[?Key==`Name`].Value | [0], InstanceId:InstanceId, Stage:Tags[?Key==`Stage`].Value | [0], Attributes:Tags[?Key==`Attributes`].Value | [0]}' \
+    --output table
