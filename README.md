@@ -43,13 +43,15 @@ SSH into the first instance returned by aws-list for a given search term.
 
 **Usage:**
 ```bash
-aws-ssh <search-term>
+aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
 ```
 
 **Examples:**
 ```bash
-aws-ssh production     # SSH to first production instance
-aws-ssh web-server     # SSH to first instance matching "web-server"
+aws-ssh production                        # SSH to first production instance
+aws-ssh web-server                        # SSH to first instance matching "web-server"
+aws-ssh my-env --attributes proc-render   # SSH to first proc-render instance
+aws-ssh dev --stage production            # SSH to first dev instance in production stage
 ```
 
 ### aws-ssm-session

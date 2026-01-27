@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # aws-ssh: SSH into the first instance returned by aws-list for a given argument
-# Usage: aws-ssh <search-term>
+# Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
 
 if [ -z "$1" ]; then
-    echo "Usage: aws-ssh <search-term>"
+    echo "Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]"
     exit 1
 fi
 
-instance_id=$(aws-list "$1" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
+instance_id=$(aws-list "$@" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
 
 if [ -z "$instance_id" ]; then
-    echo "No instance found for '$1'"
+    echo "No instance found for: $@"
     exit 2
 fi
 
