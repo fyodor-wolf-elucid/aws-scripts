@@ -1,6 +1,6 @@
 # AWS Scripts
 
-A collection of AWS management scripts for working with EC2 instances and Auto Scaling groups.
+A collection of AWS management scripts for working with EC2 instances, Auto Scaling groups, and ECS services.
 
 ## Installation
 
@@ -16,7 +16,13 @@ Add this line to your `~/.bashrc` or `~/.zshrc` to make it persistent.
 
 - AWS CLI installed and configured
 - AWS profile set (default uses `$AWS_PROFILE` environment variable)
-- Appropriate AWS permissions for EC2, Auto Scaling, and SSM
+- Appropriate AWS permissions for EC2, Auto Scaling, ECS, and SSM
+
+## Features
+
+- **Automatic Authentication**: All scripts automatically detect if your AWS SSO session is active and prompt for login if expired
+- **Profile Support**: All scripts respect the `$AWS_PROFILE` environment variable or accept a `--profile` flag
+- **Tag-based Filtering**: Scripts use AWS tags to find the right resources for your environment
 
 ## Scripts
 
@@ -107,6 +113,30 @@ aws-scale-down fyodor-wolf-elucid  # Scale down all matching ASGs
 **Filters:**
 - `env` tag must match the provided environment name
 - `Attributes` tag must be one of: `proc-bg`, `proc-vc-inf`, or `proc-render`
+
+### aws-ecs-deploy
+
+Force a new deployment for an ECS service in a cluster.
+
+**Usage:**
+```bash
+aws-ecs-deploy <env> <service>
+```
+
+**Examples:**
+```bash
+aws-ecs-deploy fyodor-wolf-elucid api      # Force redeploy api service
+aws-ecs-deploy fyodor-wolf-elucid worker-3p # Force redeploy worker-3p service
+```
+
+**How it works:**
+1. Finds the ECS cluster with matching `env` tag
+2. Verifies the service exists in that cluster
+3. Forces a new deployment using `aws ecs update-service --force-new-deployment`
+4. Shows available services if the specified service is not found
+
+**Filters:**
+- `env` tag on the ECS cluster must match the provided environment name
 
 ## Environment Variables
 

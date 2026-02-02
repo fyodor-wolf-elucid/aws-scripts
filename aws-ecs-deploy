@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Script to force a new deployment for an ECS service
+# Usage: aws-ecs-deploy <env> <service>
+# Example: aws-ecs-deploy fyodor-wolf-elucid api
+
+set -e
+
+# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/aws-scripts-common.sh"
+
+if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "Error: Environment and service parameters required"
+    echo "Usage: aws-ecs-deploy <env> <service>"
+    echo "Example: aws-ecs-deploy fyodor-wolf-elucid api"
+    exit 1
+fi
+
+ENV=$1
+SERVICE=$2
+PROFILE="${AWS_PROFILE:-default}"
+
+# Check AWS authentication
+check_aws_auth "$PROFILE"
+
+echo "Finding ECS cluster with env tag: ${ENV}"
+echo ""
+
+# Find the cluster with matching env tag
+CLUSTER_ARN=$(aws ecs list-clusters \
+    --profile "$PROFILE" \
+    --query 'clusterArns[*]' \
+    --output text | tr '\t' '\n' | while read cluster_arn; do
+        # Get tags for this cluster
+        env_tag=$(aws ecs list-tags-for-resource \
+            --profile "$PROFILE" \
+            --resource-arn "$cluster_arn" \
+            --query "tags[?key=='env'].value | [0]" \
+            --output text 2>/dev/null)
+
+        if [ "$env_tag" = "$ENV" ]; then
+            echo "$cluster_arn"
+            break
+        fi
+    done)
+
+if [ -z "$CLUSTER_ARN" ]; then
+    echo "No ECS cluster found with env tag: ${ENV}"
+    exit 1
+fi
+
+CLUSTER_NAME=$(echo "$CLUSTER_ARN" | awk -F'/' '{print $NF}')
+echo "Found cluster: $CLUSTER_NAME"
+echo ""
+
+# Check if service exists
+echo "Checking if service '$SERVICE' exists in cluster..."
+SERVICE_EXISTS=$(aws ecs describe-services \
+    --profile "$PROFILE" \
+    --cluster "$CLUSTER_NAME" \
+    --services "$SERVICE" \
+    --query 'services[?status==`ACTIVE`].serviceName' \
+    --output text)
+
+if [ -z "$SERVICE_EXISTS" ]; then
+    echo "Error: Service '$SERVICE' not found or not active in cluster '$CLUSTER_NAME'"
+    echo ""
+    echo "Available services:"
+    aws ecs list-services \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --query 'serviceArns[*]' \
+        --output text | tr '\t' '\n' | awk -F'/' '{print "  - " $NF}'
+    exit 1
+fi
+
+echo "Forcing new deployment for service: $SERVICE"
+aws ecs update-service \
+    --profile "$PROFILE" \
+    --cluster "$CLUSTER_NAME" \
+    --service "$SERVICE" \
+    --force-new-deployment \
+    --output json > /dev/null
+
+if [ $? -eq 0 ]; then
+    echo "✓ Successfully triggered new deployment for service: $SERVICE"
+    echo ""
+    echo "Monitor deployment status:"
+    echo "  aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE --profile $PROFILE"
+else
+    echo "✗ Failed to trigger deployment for service: $SERVICE"
+    exit 1
+fi

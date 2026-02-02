@@ -3,6 +3,10 @@
 # Script to list AWS EC2 instances
 # Usage: aws-list [stage] [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
 
+# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/aws-scripts-common.sh"
+
 stage=""
 attributes="manager"
 profile="$AWS_PROFILE"
@@ -57,6 +61,9 @@ if [ -n "$stage" ]; then
 fi
 
 filters+=("Name=tag:Attributes,Values=$attributes")
+
+# Check AWS authentication
+check_aws_auth "$profile"
 
 aws ec2 describe-instances --profile "$profile" \
     --filters "${filters[@]}" \

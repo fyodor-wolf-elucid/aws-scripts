@@ -6,6 +6,10 @@
 
 set -e
 
+# Source common functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/aws-scripts-common.sh"
+
 if [ -z "$1" ]; then
     echo "Error: Environment parameter required"
     echo "Usage: aws-scale-up <env>"
@@ -15,6 +19,9 @@ fi
 
 ENV=$1
 PROFILE="${AWS_PROFILE:-default}"
+
+# Check AWS authentication
+check_aws_auth "$PROFILE"
 
 echo "Fetching Auto Scaling groups with env tag: ${ENV}"
 echo "Looking for Attributes: proc-bg, proc-vc-inf, proc-render"
