@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# aws-get-case: Download DICOM cases from AWS instances using rsync
+# Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+# Example: aws-get-case ip-ffr patient123 --attributes manager
+
+if [ "$#" -lt 2 ]; then
+    echo "Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]"
+    echo "Example: aws-get-case ip-ffr patient123 --attributes manager"
+    echo "Example: aws-get-case ip-dev study-001"
+    exit 1
+fi
+
+search_term="$1"
+case_name="$2"
+shift 2  # Remove search_term and case_name from arguments
+
+remote_path="/inst/zenith/AppData/Images/$case_name"
+local_path="$HOME/DICOM/$case_name"
+
+# Check if --attributes is provided, if not add default
+has_attributes=false
+for arg in "$@"; do
+    if [ "$arg" = "--attributes" ]; then
+        has_attributes=true
+        break
+    fi
+done
+
+if [ "$has_attributes" = false ]; then
+    set -- "$@" --attributes manager
+fi
+
+echo "Looking up instance with: aws-list $search_term $@"
+
+# Get the instance ID
+instance_id=$(aws-list "$search_term" "$@" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
+
+if [ -z "$instance_id" ]; then
+    echo "No instance found for: $search_term $@"
+    exit 2
+fi
+
+echo "Found instance: $instance_id"
+echo "Downloading case: $case_name"
+echo "  Remote: $instance_id:$remote_path"
+echo "  Local:  $local_path"
+echo ""
+
+# Use rsync with optimized flags for DICOM files
+# --no-compress: DICOM files are already compressed
+# -a: archive mode (preserves permissions, timestamps, etc.)
+# -v: verbose
+# -P: show progress and keep partial files for resuming
+rsync -avP --no-compress "$instance_id:$remote_path" "$local_path"
+
+exit_code=$?
+
+if [ $exit_code -eq 0 ]; then
+    echo ""
+    echo "Download completed successfully!"
+else
+    echo ""
+    echo "Download failed or interrupted (exit code: $exit_code)"
+    echo "You can resume by running the same command again."
+fi
+
+exit $exit_code

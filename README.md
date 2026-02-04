@@ -78,6 +78,31 @@ aws-ssm-session my-instance --attributes proc-render  # Connect to render proces
 
 **Default attributes:** "Attribute Manager"
 
+### aws-get-case
+
+Download DICOM case folders from AWS instances using rsync with optimized settings for large medical imaging files.
+
+**Usage:**
+```bash
+aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+```
+
+**Examples:**
+```bash
+aws-get-case ip-ffr patient123                       # Downloads with default attributes (manager)
+aws-get-case ip-dev study-001 --attributes manager   # Downloads from specific environment
+aws-get-case production case-2024 --stage prod       # Downloads from production with stage filter
+```
+
+**Features:**
+- Uses `aws-list` to find instances (same as `aws-ssh`)
+- Default attributes: "manager" (if not specified)
+- Downloads from `/inst/zenith/AppData/Images/<case-name>` on remote
+- Saves to `~/DICOM/<case-name>` locally
+- Optimized for DICOM files (no compression during transfer)
+- Resumable downloads - rerun the same command if interrupted
+- Progress tracking during download
+
 ### aws-scale-up
 
 Scale up Auto Scaling groups to 1 instance (min-size=1, max-size=1, desired-capacity=1).
