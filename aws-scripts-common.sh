@@ -8,8 +8,14 @@ check_aws_auth() {
 
     if ! aws sts get-caller-identity --profile "$profile" &> /dev/null; then
         echo "AWS SSO session not active or expired. Initiating login..."
+        echo "A browser window will open. Please verify the code shown below matches what appears in your browser."
         echo ""
-        aws sso login --profile "$profile"
+
+        # Run aws sso login with direct terminal access to ensure verification code is visible
+        # Redirect to /dev/tty to bypass any output capturing
+        aws sso login --profile "$profile" < /dev/tty > /dev/tty 2>&1
+
+        echo ""
 
         # Verify login was successful
         if ! aws sts get-caller-identity --profile "$profile" &> /dev/null; then

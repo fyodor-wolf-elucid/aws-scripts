@@ -80,18 +80,18 @@ aws-ssm-session my-instance --attributes proc-render  # Connect to render proces
 
 ### aws-get-case
 
-Download DICOM case folders from AWS instances using rsync with optimized settings for large medical imaging files.
+Download DICOM case folders from AWS instances with optimized settings for large medical imaging files.
 
 **Usage:**
 ```bash
-aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [--checksums]
 ```
 
 **Examples:**
 ```bash
-aws-get-case ip-ffr patient123                       # Downloads with default attributes (manager)
+aws-get-case ip-ffr patient123                       # Fast download with tar (default)
 aws-get-case ip-dev study-001 --attributes manager   # Downloads from specific environment
-aws-get-case production case-2024 --stage prod       # Downloads from production with stage filter
+aws-get-case ip-ffr case-2024 --checksums            # Use rsync with checksums (slower, resumable)
 ```
 
 **Features:**
@@ -99,9 +99,14 @@ aws-get-case production case-2024 --stage prod       # Downloads from production
 - Default attributes: "manager" (if not specified)
 - Downloads from `/inst/zenith/AppData/Images/<case-name>` on remote
 - Saves to `~/DICOM/<case-name>` locally
-- Optimized for DICOM files (no compression during transfer)
-- Resumable downloads - rerun the same command if interrupted
-- Progress tracking during download
+- **Default (tar)**: Fastest transfer, no compression overhead, not resumable
+- **With --checksums (rsync)**: Slower but resumable, verifies data integrity
+
+**Download Methods:**
+- **tar (default)**: Fastest for initial downloads, but if interrupted you must start over
+  - With `pv` installed: Shows progress bar with transfer rate and ETA
+  - Without `pv`: Shows filenames as they transfer (install with `sudo apt install pv`)
+- **rsync (--checksums)**: Slower but can resume interrupted downloads, use for unreliable connections
 
 ### aws-scale-up
 

@@ -1,13 +1,17 @@
 #!/bin/bash
 
-# aws-get-case: Download DICOM cases from AWS instances using rsync
-# Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+# aws-get-case: Download DICOM cases from AWS instances
+# Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [--checksums]
 # Example: aws-get-case ip-ffr patient123 --attributes manager
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]"
+    echo "Usage: aws-get-case <search-term> <case-name> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [--checksums]"
     echo "Example: aws-get-case ip-ffr patient123 --attributes manager"
     echo "Example: aws-get-case ip-dev study-001"
+    echo ""
+    echo "Options:"
+    echo "  --checksums    Use rsync with checksums (slower, resumable, verifies data integrity)"
+    echo "                 Default is tar (faster, not resumable)"
     exit 1
 fi
 
@@ -18,26 +22,45 @@ shift 2  # Remove search_term and case_name from arguments
 remote_path="/inst/zenith/AppData/Images/$case_name"
 local_path="$HOME/DICOM/$case_name"
 
-# Check if --attributes is provided, if not add default
+# Check for flags
 has_attributes=false
-for arg in "$@"; do
-    if [ "$arg" = "--attributes" ]; then
-        has_attributes=true
-        break
-    fi
+use_checksums=false
+aws_list_args=()
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --checksums)
+            use_checksums=true
+            shift
+            ;;
+        --attributes)
+            has_attributes=true
+            aws_list_args+=("$1" "$2")
+            shift 2
+            ;;
+        --profile|--stage)
+            aws_list_args+=("$1" "$2")
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
 done
 
+# Add default attributes if not specified
 if [ "$has_attributes" = false ]; then
-    set -- "$@" --attributes manager
+    aws_list_args+=(--attributes manager)
 fi
 
-echo "Looking up instance with: aws-list $search_term $@"
+echo "Looking up instance with: aws-list $search_term ${aws_list_args[@]}"
 
 # Get the instance ID
-instance_id=$(aws-list "$search_term" "$@" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
+instance_id=$(aws-list "$search_term" "${aws_list_args[@]}" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
 
 if [ -z "$instance_id" ]; then
-    echo "No instance found for: $search_term $@"
+    echo "No instance found for: $search_term ${aws_list_args[@]}"
     exit 2
 fi
 
@@ -45,14 +68,56 @@ echo "Found instance: $instance_id"
 echo "Downloading case: $case_name"
 echo "  Remote: $instance_id:$remote_path"
 echo "  Local:  $local_path"
-echo ""
 
-# Use rsync with optimized flags for DICOM files
-# --no-compress: DICOM files are already compressed
-# -a: archive mode (preserves permissions, timestamps, etc.)
-# -v: verbose
-# -P: show progress and keep partial files for resuming
-rsync -avP --no-compress "$instance_id:$remote_path" "$local_path"
+if [ "$use_checksums" = true ]; then
+    echo "  Method: rsync (with checksums, resumable)"
+    echo ""
+
+    # Use rsync with optimized flags for DICOM files
+    # --no-compress: DICOM files are already compressed
+    # -a: archive mode (preserves permissions, timestamps, etc.)
+    # --info=progress2: show overall progress for entire transfer (not per-file)
+    # --partial: keep partial files for resuming
+    rsync -a --info=progress2 --no-compress --partial "$instance_id:$remote_path" "$local_path"
+else
+    echo "  Method: tar (fast, not resumable)"
+    echo ""
+
+    # Create parent directory if it doesn't exist
+    mkdir -p "$(dirname "$local_path")"
+
+    # Check if pv is available for progress display
+    if command -v pv &> /dev/null; then
+        # Get remote directory size for progress bar
+        remote_size=$(ssh "$instance_id" "du -sb '$remote_path' 2>/dev/null | cut -f1")
+
+        if [ -n "$remote_size" ] && [ "$remote_size" -gt 0 ]; then
+            echo "Remote size: $(numfmt --to=iec-i --suffix=B $remote_size 2>/dev/null || echo "$remote_size bytes")"
+            # Use tar with pv for progress
+            ssh "$instance_id" "tar -cf - '$remote_path'" | pv -s "$remote_size" | tar -xf - -C "$HOME/DICOM/" --strip-components=4
+        else
+            # Size check failed, use pv without size (shows throughput only)
+            ssh "$instance_id" "tar -cf - '$remote_path'" | pv | tar -xf - -C "$HOME/DICOM/" --strip-components=4
+        fi
+    else
+        # No pv available, use plain tar with verbose flag for some feedback
+        echo "Tip: Install 'pv' for progress display (sudo apt install pv)"
+        ssh "$instance_id" "tar -cvf - '$remote_path' 2>&1 | grep -v '^$'" | tar -xf - -C "$HOME/DICOM/" --strip-components=4
+    fi
+
+    exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        echo ""
+        echo "Download completed successfully!"
+    else
+        echo ""
+        echo "Download failed (exit code: $exit_code)"
+        echo "Tip: Use --checksums flag for resumable downloads"
+    fi
+
+    exit $exit_code
+fi
 
 exit_code=$?
 
