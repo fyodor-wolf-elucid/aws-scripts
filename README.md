@@ -76,7 +76,7 @@ aws-ssm-session my-instance --stage production        # Connect to production in
 aws-ssm-session my-instance --attributes proc-render  # Connect to render process instance
 ```
 
-**Default attributes:** "Attribute Manager"
+**Default attributes:** "manager"
 
 ### aws-get-case
 

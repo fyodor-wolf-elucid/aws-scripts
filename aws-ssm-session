@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/aws-scripts-common.sh"
 
 instance_name=""
 stage=""
-attributes="Attribute Manager"  # Default to Attribute Manager
+attributes="manager"  # Default to manager (same as aws-list)
 profile="${AWS_PROFILE:-default}"
 
 # Parse arguments
@@ -47,7 +47,7 @@ done
 
 if [ -z "$instance_name" ]; then
     echo "Usage: aws-ssm-session <instance_name> [--stage <stage>] [--attributes <attributes>]"
-    echo "  Default attributes: 'Attribute Manager'"
+    echo "  Default attributes: 'manager'"
     exit 1
 fi
 
