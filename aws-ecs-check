@@ -1,0 +1,225 @@
+#!/bin/bash
+
+# Check if running ECS tasks are up to date with the latest image digest for their tag.
+# Compares the digest of each running container against the current digest in the registry.
+# Usage: aws-ecs-check <env> [--service SERVICE] [--profile PROFILE]
+# Example: aws-ecs-check al-amir-elucid
+# Example: aws-ecs-check al-amir-elucid --service api
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/aws-scripts-common.sh"
+
+ENV=""
+SERVICE_FILTER=""
+PROFILE="${AWS_PROFILE:-default}"
+
+while (( "$#" )); do
+    case "$1" in
+        --profile)
+            if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+                PROFILE="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        --service)
+            if [ -n "$2" ] && [ "${2:0:1}" != "-" ]; then
+                SERVICE_FILTER="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                exit 1
+            fi
+            ;;
+        -h|--help)
+            echo "aws-ecs-check - Check if running ECS tasks are up to date"
+            echo ""
+            echo "USAGE:"
+            echo "    aws-ecs-check <env> [OPTIONS]"
+            echo ""
+            echo "OPTIONS:"
+            echo "    --service SERVICE   Only check a specific service"
+            echo "    --profile PROFILE   AWS profile to use (default: \$AWS_PROFILE or 'default')"
+            echo "    -h, --help          Show this help message"
+            echo ""
+            echo "EXAMPLES:"
+            echo "    aws-ecs-check al-amir-elucid"
+            echo "    aws-ecs-check al-amir-elucid --service api"
+            echo "    aws-ecs-check fyodor-wolf-elucid --profile elucid-dev"
+            exit 0
+            ;;
+        *)
+            if [ -z "$ENV" ]; then
+                ENV="$1"
+            else
+                echo "Error: Unknown argument $1" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$ENV" ]; then
+    echo "Error: Environment parameter required"
+    echo "Usage: aws-ecs-check <env> [--service SERVICE]"
+    exit 1
+fi
+
+check_aws_auth "$PROFILE"
+
+# Find cluster by env tag
+echo "Finding ECS cluster with env tag: ${ENV}"
+CLUSTER_ARN=$(aws ecs list-clusters \
+    --profile "$PROFILE" \
+    --query 'clusterArns[*]' \
+    --output text | tr '\t' '\n' | while read -r cluster_arn; do
+        env_tag=$(aws ecs list-tags-for-resource \
+            --profile "$PROFILE" \
+            --resource-arn "$cluster_arn" \
+            --query "tags[?key=='env'].value | [0]" \
+            --output text 2>/dev/null)
+        if [ "$env_tag" = "$ENV" ]; then
+            echo "$cluster_arn"
+            break
+        fi
+    done)
+
+if [ -z "$CLUSTER_ARN" ]; then
+    echo "No ECS cluster found with env tag: ${ENV}"
+    exit 1
+fi
+
+CLUSTER_NAME=$(echo "$CLUSTER_ARN" | awk -F'/' '{print $NF}')
+echo "Found cluster: $CLUSTER_NAME"
+echo ""
+
+# List services
+if [ -n "$SERVICE_FILTER" ]; then
+    SERVICES="$SERVICE_FILTER"
+else
+    SERVICES=$(aws ecs list-services \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --query 'serviceArns[*]' \
+        --output text | tr '\t' '\n' | awk -F'/' '{print $NF}')
+fi
+
+export PROFILE
+
+for SERVICE in $SERVICES; do
+    echo "=== Service: $SERVICE ==="
+
+    TASK_ARNS=$(aws ecs list-tasks \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --service-name "$SERVICE" \
+        --desired-status RUNNING \
+        --query 'taskArns[*]' \
+        --output text 2>/dev/null)
+
+    if [ -z "$TASK_ARNS" ]; then
+        echo "  No running tasks"
+        echo ""
+        continue
+    fi
+
+    aws ecs describe-tasks \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --tasks $TASK_ARNS \
+        --output json | python3 -c "
+import json, sys, subprocess, os
+from datetime import datetime, timezone
+
+data = json.load(sys.stdin)
+
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+NC = '\033[0m'
+
+def get_gh_token():
+    try:
+        return subprocess.run(
+            ['gh', 'auth', 'token'],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except Exception:
+        return None
+
+def get_latest_ghcr_digest(image_base, tag):
+    path = image_base.replace('ghcr.io/', '')
+    try:
+        gh_token = get_gh_token()
+        if gh_token:
+            # Exchange GitHub token for GHCR registry token
+            token = json.loads(subprocess.run(
+                ['curl', '-sf', '-u', f'token:{gh_token}',
+                 f'https://ghcr.io/token?scope=repository:{path}:pull'],
+                capture_output=True, text=True, timeout=10
+            ).stdout).get('token', '')
+        else:
+            token = json.loads(subprocess.run(
+                ['curl', '-sf', f'https://ghcr.io/token?scope=repository:{path}:pull'],
+                capture_output=True, text=True, timeout=10
+            ).stdout).get('token', '')
+        headers = subprocess.run(
+            ['curl', '-sf', '-H', f'Authorization: Bearer {token}',
+             '-H', 'Accept: application/vnd.docker.distribution.manifest.v2+json',
+             '-H', 'Accept: application/vnd.oci.image.index.v1+json',
+             '--head', f'https://ghcr.io/v2/{path}/manifests/{tag}'],
+            capture_output=True, text=True, timeout=10
+        ).stdout
+        for line in headers.splitlines():
+            if line.lower().startswith('docker-content-digest:'):
+                return line.split(':', 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+digest_cache = {}
+
+for task in data.get('tasks', []):
+    task_id = task['taskArn'].split('/')[-1]
+    started = task.get('startedAt', '')
+    if started:
+        dt = datetime.fromisoformat(started.replace('Z', '+00:00'))
+        age = datetime.now(timezone.utc) - dt
+        hours = int(age.total_seconds() // 3600)
+        age_str = f'{hours}h ago'
+    else:
+        age_str = 'unknown'
+    print(f'  Task: {task_id[:12]}  (started {age_str})')
+
+    for c in task.get('containers', []):
+        image = c.get('image') or ''
+        if 'ghcr.io' not in image:
+            continue
+        running_digest = c.get('imageDigest') or ''
+        image_base, tag = image.rsplit(':', 1) if ':' in image.split('/')[-1] else (image, 'latest')
+        cache_key = f'{image_base}:{tag}'
+        if cache_key not in digest_cache:
+            digest_cache[cache_key] = get_latest_ghcr_digest(image_base, tag)
+        latest_digest = digest_cache[cache_key]
+
+        short_run = running_digest[:19] if running_digest else 'unknown'
+        short_lat = latest_digest[:19] if latest_digest else 'unknown'
+
+        if not latest_digest:
+            status = f'{YELLOW}[UNKNOWN]{NC}'
+        elif running_digest == latest_digest:
+            status = f'{GREEN}[UP TO DATE]{NC}'
+        else:
+            status = f'{RED}[STALE]{NC}  latest: {short_lat}'
+
+        print(f'    {c[\"name\"]:<30} {tag:<20} {short_run}  {status}')
+    print()
+"
+done
+
+echo "To redeploy a stale service run: aws-ecs-deploy $ENV <service>"

@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Script to force a new deployment for an ECS service
-# Usage: aws-ecs-deploy <env> <service>
+# Script to force a new deployment for one or all ECS services
+# Usage: aws-ecs-deploy <env> [service]
 # Example: aws-ecs-deploy fyodor-wolf-elucid api
+# Example: aws-ecs-deploy fyodor-wolf-elucid  (deploys all services)
 
 set -e
 
@@ -10,15 +11,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/aws-scripts-common.sh"
 
-if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Error: Environment and service parameters required"
-    echo "Usage: aws-ecs-deploy <env> <service>"
+if [ -z "$1" ]; then
+    echo "Error: Environment parameter required"
+    echo "Usage: aws-ecs-deploy <env> [service]"
     echo "Example: aws-ecs-deploy fyodor-wolf-elucid api"
+    echo "Example: aws-ecs-deploy fyodor-wolf-elucid  (deploys all services)"
     exit 1
 fi
 
 ENV=$1
-SERVICE=$2
+SERVICE="${2:-}"
 PROFILE="${AWS_PROFILE:-default}"
 
 # Check AWS authentication
@@ -54,41 +56,54 @@ CLUSTER_NAME=$(echo "$CLUSTER_ARN" | awk -F'/' '{print $NF}')
 echo "Found cluster: $CLUSTER_NAME"
 echo ""
 
-# Check if service exists
-echo "Checking if service '$SERVICE' exists in cluster..."
-SERVICE_EXISTS=$(aws ecs describe-services \
-    --profile "$PROFILE" \
-    --cluster "$CLUSTER_NAME" \
-    --services "$SERVICE" \
-    --query 'services[?status==`ACTIVE`].serviceName' \
-    --output text)
+# Build list of services to deploy
+if [ -n "$SERVICE" ]; then
+    # Verify the specified service exists
+    SERVICE_EXISTS=$(aws ecs describe-services \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --services "$SERVICE" \
+        --query 'services[?status==`ACTIVE`].serviceName' \
+        --output text)
 
-if [ -z "$SERVICE_EXISTS" ]; then
-    echo "Error: Service '$SERVICE' not found or not active in cluster '$CLUSTER_NAME'"
-    echo ""
-    echo "Available services:"
-    aws ecs list-services \
+    if [ -z "$SERVICE_EXISTS" ]; then
+        echo "Error: Service '$SERVICE' not found or not active in cluster '$CLUSTER_NAME'"
+        echo ""
+        echo "Available services:"
+        aws ecs list-services \
+            --profile "$PROFILE" \
+            --cluster "$CLUSTER_NAME" \
+            --query 'serviceArns[*]' \
+            --output text | tr '\t' '\n' | awk -F'/' '{print "  - " $NF}'
+        exit 1
+    fi
+    SERVICES="$SERVICE"
+else
+    SERVICES=$(aws ecs list-services \
         --profile "$PROFILE" \
         --cluster "$CLUSTER_NAME" \
         --query 'serviceArns[*]' \
-        --output text | tr '\t' '\n' | awk -F'/' '{print "  - " $NF}'
-    exit 1
-fi
-
-echo "Forcing new deployment for service: $SERVICE"
-aws ecs update-service \
-    --profile "$PROFILE" \
-    --cluster "$CLUSTER_NAME" \
-    --service "$SERVICE" \
-    --force-new-deployment \
-    --output json > /dev/null
-
-if [ $? -eq 0 ]; then
-    echo "✓ Successfully triggered new deployment for service: $SERVICE"
+        --output text | tr '\t' '\n' | awk -F'/' '{print $NF}')
+    echo "No service specified — deploying all services in cluster"
     echo ""
-    echo "Monitor deployment status:"
-    echo "  aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE --profile $PROFILE"
-else
-    echo "✗ Failed to trigger deployment for service: $SERVICE"
-    exit 1
 fi
+
+for SVC in $SERVICES; do
+    echo "Forcing new deployment for service: $SVC"
+    aws ecs update-service \
+        --profile "$PROFILE" \
+        --cluster "$CLUSTER_NAME" \
+        --service "$SVC" \
+        --force-new-deployment \
+        --output json > /dev/null
+
+    if [ $? -eq 0 ]; then
+        echo "✓ Successfully triggered new deployment for service: $SVC"
+    else
+        echo "✗ Failed to trigger deployment for service: $SVC"
+    fi
+done
+
+echo ""
+echo "Monitor deployment status:"
+echo "  aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICES --profile $PROFILE"
