@@ -17,6 +17,7 @@ Add this line to your `~/.bashrc` or `~/.zshrc` to make it persistent.
 - AWS CLI installed and configured
 - AWS profile set (default uses `$AWS_PROFILE` environment variable)
 - Appropriate AWS permissions for EC2, Auto Scaling, ECS, and SSM
+- GitHub CLI (`gh`) installed and authenticated (required for `aws-ecs-check`)
 
 ## Features
 
@@ -144,29 +145,55 @@ aws-scale-down fyodor-wolf-elucid  # Scale down all matching ASGs
 - `env` tag must match the provided environment name
 - `Attributes` tag must be one of: `proc-bg`, `proc-vc-inf`, or `proc-render`
 
-### aws-ecs-deploy
+### aws-ecs-check
 
-Force a new deployment for an ECS service in a cluster.
+Check whether running ECS tasks are up to date with the latest image digest in GHCR. Useful for spotting stale services after a new image is built.
 
 **Usage:**
 ```bash
-aws-ecs-deploy <env> <service>
+aws-ecs-check <env> [--service SERVICE] [--profile PROFILE]
 ```
 
 **Examples:**
 ```bash
-aws-ecs-deploy fyodor-wolf-elucid api      # Force redeploy api service
-aws-ecs-deploy fyodor-wolf-elucid worker-3p # Force redeploy worker-3p service
+aws-ecs-check fyodor-wolf-elucid               # Check all services
+aws-ecs-check fyodor-wolf-elucid --service api # Check a specific service
+```
+
+**Output:**
+- `[UP TO DATE]` — running digest matches the latest image in the registry
+- `[STALE]` — a newer image is available for the same tag; redeploy with `aws-ecs-deploy`
+- `[UNKNOWN]` — could not fetch the latest digest (check `gh auth status`)
+
+**Requires:** `gh` CLI authenticated (`gh auth login`)
+
+### aws-ecs-deploy
+
+Force a new deployment for one or all ECS services in a cluster, pulling the latest image for the configured tag.
+
+**Usage:**
+```bash
+aws-ecs-deploy <env> [service]
+```
+
+**Examples:**
+```bash
+aws-ecs-deploy fyodor-wolf-elucid           # Redeploy all services
+aws-ecs-deploy fyodor-wolf-elucid api       # Redeploy api service only
+aws-ecs-deploy fyodor-wolf-elucid worker-io # Redeploy worker-io service only
 ```
 
 **How it works:**
 1. Finds the ECS cluster with matching `env` tag
-2. Verifies the service exists in that cluster
+2. If no service specified, redeploys all active services in the cluster
 3. Forces a new deployment using `aws ecs update-service --force-new-deployment`
 4. Shows available services if the specified service is not found
 
-**Filters:**
-- `env` tag on the ECS cluster must match the provided environment name
+**Typical workflow:**
+```bash
+aws-ecs-check fyodor-wolf-elucid    # identify stale services
+aws-ecs-deploy fyodor-wolf-elucid   # redeploy all (or specify a single service)
+```
 
 ## Environment Variables
 
