@@ -21,7 +21,7 @@ Add this line to your `~/.bashrc` or `~/.zshrc` to make it persistent.
 
 ## Features
 
-- **Automatic Authentication**: All scripts automatically detect if your AWS SSO session is active and prompt for login if expired
+- **Automatic Authentication**: All scripts automatically detect if your AWS SSO session is active and prompt for login if expired. In non-TTY contexts (scripts, CI), they exit with a clear error if the session is expired rather than hanging — run `aws sso login` in a terminal first.
 - **Profile Support**: All scripts respect the `$AWS_PROFILE` environment variable or accept a `--profile` flag
 - **Tag-based Filtering**: Scripts use AWS tags to find the right resources for your environment
 
@@ -46,11 +46,11 @@ aws-list dev --profile my-profile     # List dev instances with specific profile
 
 ### aws-ssh
 
-SSH into the first instance returned by aws-list for a given search term.
+SSH into the first instance returned by aws-list for a given search term. Supports running commands non-interactively by passing them after `--`.
 
 **Usage:**
 ```bash
-aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [-- COMMAND]
 ```
 
 **Examples:**
@@ -59,25 +59,31 @@ aws-ssh production                        # SSH to first production instance
 aws-ssh web-server                        # SSH to first instance matching "web-server"
 aws-ssh my-env --attributes proc-render   # SSH to first proc-render instance
 aws-ssh dev --stage production            # SSH to first dev instance in production stage
+aws-ssh ft5 -- docker ps                  # Run command non-interactively
+aws-ssh ft5 -- "cd /some/path && ls"      # Run shell command non-interactively
 ```
 
 ### aws-ssm-session
 
-Connect to EC2 instances via AWS Systems Manager Session Manager (more secure than SSH).
+Connect to EC2 instances via AWS Systems Manager Session Manager (more secure than SSH, works on instances without SSH access). Supports running commands non-interactively by passing them after `--`.
 
 **Usage:**
 ```bash
-aws-ssm-session <instance_name> [--stage STAGE] [--attributes ATTRIBUTES]
+aws-ssm-session <instance_name> [--stage STAGE] [--attributes ATTRIBUTES] [-- COMMAND]
 ```
 
 **Examples:**
 ```bash
-aws-ssm-session my-instance                           # Connect with default attributes
-aws-ssm-session my-instance --stage production        # Connect to production instance
-aws-ssm-session my-instance --attributes proc-render  # Connect to render process instance
+aws-ssm-session my-instance                               # Connect with default attributes
+aws-ssm-session my-instance --stage production            # Connect to production instance
+aws-ssm-session my-instance --attributes proc-render      # Connect to render process instance
+aws-ssm-session ft5 -- docker ps                          # Run command non-interactively
+aws-ssm-session ft5 --stage prod -- "systemctl status api" # Run command on specific stage
 ```
 
 **Default attributes:** "manager"
+
+**Non-interactive mode** uses `ssm send-command` under the hood — no TTY required, stdout/stderr are printed and the script exits with the remote exit code. Use this for environments where SSH is not available.
 
 ### aws-get-case
 

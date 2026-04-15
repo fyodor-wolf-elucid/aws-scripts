@@ -1,19 +1,42 @@
 #!/bin/bash
 
 # aws-ssh: SSH into the first instance returned by aws-list for a given argument
-# Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]
+# Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [-- COMMAND]
+#
+# Optionally pass a command after -- to run non-interactively, e.g.:
+#   aws-ssh ft5 -- docker ps
+#   aws-ssh ft5 -- "cd /some/path && my-command"
 
 if [ -z "$1" ]; then
-    echo "Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES]"
+    echo "Usage: aws-ssh <search-term> [--profile PROFILE] [--stage STAGE] [--attributes ATTRIBUTES] [-- COMMAND]"
     exit 1
 fi
 
-instance_id=$(aws-list "$@" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
+# Split args on -- to separate aws-list args from the remote command
+aws_list_args=()
+remote_command=()
+found_separator=false
+
+for arg in "$@"; do
+    if [ "$found_separator" = true ]; then
+        remote_command+=("$arg")
+    elif [ "$arg" = "--" ]; then
+        found_separator=true
+    else
+        aws_list_args+=("$arg")
+    fi
+done
+
+instance_id=$(aws-list "${aws_list_args[@]}" | awk '/^|  [a-zA-Z0-9_-]+  |  i-[a-z0-9]+  / { match($0, /i-[a-z0-9]+/); if (RSTART) { print substr($0, RSTART, RLENGTH); exit } }')
 
 if [ -z "$instance_id" ]; then
-    echo "No instance found for: $@"
+    echo "No instance found for: ${aws_list_args[*]}"
     exit 2
 fi
 
-echo "Connecting to $instance_id..."
-ssh "$instance_id"
+if [ ${#remote_command[@]} -gt 0 ]; then
+    ssh -T "$instance_id" "${remote_command[@]}"
+else
+    echo "Connecting to $instance_id..."
+    ssh "$instance_id"
+fi
