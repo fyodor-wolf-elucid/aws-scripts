@@ -1,8 +1,16 @@
 #!/bin/bash
 
 # Script to scale up AWS Auto Scaling groups to 1
-# Usage: aws-scale-up <env>
-# Example: aws-scale-up fyodor-wolf-wolf
+# Usage: aws-scale-up <env> [--no-pull]
+# Example: aws-scale-up fyodor-wolf-elucid
+#
+# Scales up the manager ASG first and waits for its instance to be running
+# before scaling up proc-bg/proc-vc-inf/proc-render, since those nodes need
+# a live manager to register with on boot.
+#
+# Then pre-pulls the env's job images (read from the api ECS task definition)
+# onto each proc node, so the first condor job of the day doesn't block on a
+# multi-GB pull. Pass --no-pull to skip.
 
 set -e
 
@@ -10,58 +18,256 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/aws-scripts-common.sh"
 
-if [ -z "$1" ]; then
+usage() {
+    echo "Usage: aws-scale-up <env> [--no-pull]"
+    echo "Example: aws-scale-up fyodor-wolf-elucid"
+}
+
+ENV=""
+PULL_IMAGES=true
+while (( "$#" )); do
+    case "$1" in
+        --no-pull)
+            PULL_IMAGES=false
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            if [ -n "$ENV" ]; then
+                echo "Error: Unknown argument $1" >&2
+                usage
+                exit 1
+            fi
+            ENV="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$ENV" ]; then
     echo "Error: Environment parameter required"
-    echo "Usage: aws-scale-up <env>"
-    echo "Example: aws-scale-up fyodor-wolf-wolf"
+    usage
     exit 1
 fi
 
-ENV=$1
 PROFILE="${AWS_PROFILE:-default}"
+
+# Which *_DOCKER_IMAGE settings each proc node runs. Mirrors the EVJobType slot
+# routing in zenith-config-templates/templates/etc/condor/config.d/elucid.conf.j2.
+role_image_vars() {
+    case "$1" in
+        proc-render) echo "PRO_DOCKER_IMAGE" ;;
+        proc-vc-inf) echo "VC_DOCKER_IMAGE INFERENCE_DOCKER_IMAGE" ;;
+        proc-bg) echo "NRRD_DOCKER_IMAGE VC_DOCKER_IMAGE INFERENCE_DOCKER_IMAGE VESSEL_INFERENCE_DOCKER_IMAGE" ;;
+    esac
+}
 
 # Check AWS authentication
 check_aws_auth "$PROFILE"
 
 echo "Fetching Auto Scaling groups with env tag: ${ENV}"
-echo "Looking for Attributes: proc-bg, proc-vc-inf, proc-render"
+echo "Looking for Attributes: manager, proc-bg, proc-vc-inf, proc-render"
 echo ""
 
-# Get all ASGs and filter by tags
-ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups \
+# Get all ASGs and filter by tags, keeping the Attributes value alongside the name
+ASG_INFO=$(aws autoscaling describe-auto-scaling-groups \
     --profile "$PROFILE" \
     --query "AutoScalingGroups[*].[AutoScalingGroupName, Tags[?Key=='env'].Value | [0], Tags[?Key=='Attributes'].Value | [0]]" \
     --output text | \
-    awk -v env="$ENV" '$2 == env && ($3 == "proc-bg" || $3 == "proc-vc-inf" || $3 == "proc-render") {print $1}' | \
+    awk -v env="$ENV" '$2 == env && ($3 == "manager" || $3 == "proc-bg" || $3 == "proc-vc-inf" || $3 == "proc-render") {print $1, $3}' | \
     sort)
 
-if [ -z "$ASG_NAMES" ]; then
+if [ -z "$ASG_INFO" ]; then
     echo "No Auto Scaling groups found with:"
     echo "  - env tag: ${ENV}"
-    echo "  - Attributes tag: proc-bg, proc-vc-inf, or proc-render"
+    echo "  - Attributes tag: manager, proc-bg, proc-vc-inf, or proc-render"
     exit 1
 fi
 
+MANAGER_ASG=$(echo "$ASG_INFO" | awk '$2 == "manager" {print $1}')
+PROC_ASG_INFO=$(echo "$ASG_INFO" | awk '$2 != "manager"')
+
 echo "Found Auto Scaling groups:"
-echo "$ASG_NAMES"
+echo "$ASG_INFO" | awk '{print $1}'
 echo ""
 
-# Scale up each ASG
-for ASG_NAME in $ASG_NAMES; do
-    echo "Scaling up: $ASG_NAME"
+scale_up_asg() {
+    echo "Scaling up: $1"
     aws autoscaling update-auto-scaling-group \
         --profile "$PROFILE" \
-        --auto-scaling-group-name "$ASG_NAME" \
+        --auto-scaling-group-name "$1" \
         --min-size 1 \
         --max-size 1 \
         --desired-capacity 1
+    echo "✓ Successfully scaled up $1 to 1"
+}
 
-    if [ $? -eq 0 ]; then
-        echo "✓ Successfully scaled up $ASG_NAME to 1"
-    else
-        echo "✗ Failed to scale up $ASG_NAME"
-    fi
+# Run the given command every 5s until it succeeds, for up to 5 minutes
+poll_until() {
+    local description="$1"
+    shift
+    local elapsed=0
+
+    while [ "$elapsed" -lt 300 ]; do
+        "$@" && return 0
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+
+    echo "✗ Timed out waiting for $description" >&2
+    return 1
+}
+
+# Print the ASG's instance ID if it is InService
+asg_instance_in_service() {
+    local state instance_id
+    read -r state instance_id < <(aws autoscaling describe-auto-scaling-groups \
+        --profile "$PROFILE" \
+        --auto-scaling-group-names "$1" \
+        --query 'AutoScalingGroups[0].Instances[0].[LifecycleState, InstanceId]' \
+        --output text 2>/dev/null)
+    [ "$state" = "InService" ] && echo "$instance_id"
+}
+
+ssm_agent_online() {
+    [ "$(aws ssm describe-instance-information --profile "$PROFILE" \
+        --filters "Key=InstanceIds,Values=$1" \
+        --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)" = "Online" ]
+}
+
+# Print "NAME IMAGE" lines for every *_DOCKER_IMAGE env var on the env's api ECS service
+get_job_images() {
+    local cluster_arn task_def
+    cluster_arn=$(aws resourcegroupstaggingapi get-resources --profile "$PROFILE" \
+        --resource-type-filters ecs:cluster --tag-filters "Key=env,Values=$ENV" \
+        --query 'ResourceTagMappingList[0].ResourceARN' --output text)
+    [ -n "$cluster_arn" ] && [ "$cluster_arn" != "None" ] || return 1
+
+    task_def=$(aws ecs describe-services --profile "$PROFILE" --cluster "$cluster_arn" --services api \
+        --query 'services[0].taskDefinition' --output text)
+    [ -n "$task_def" ] && [ "$task_def" != "None" ] || return 1
+
+    aws ecs describe-task-definition --profile "$PROFILE" --task-definition "$task_def" \
+        --query "taskDefinition.containerDefinitions[].environment[?ends_with(name, '_DOCKER_IMAGE')][].[name, value]" \
+        --output text | sort -u
+}
+
+# Start a docker pull of the given images on an instance via SSM; print the command ID
+send_prepull() {
+    local instance_id="$1"
+    shift
+    # Registry creds live in condor's docker config; config-ninja writes the ghcr.io
+    # login asynchronously on boot, so wait for it before pulling.
+    local script
+    script=$(cat <<EOF
+export DOCKER_CONFIG=/var/lib/condor/.docker
+for i in \$(seq 60); do grep -q ghcr.io "\$DOCKER_CONFIG/config.json" 2>/dev/null && break; sleep 5; done
+grep -q ghcr.io "\$DOCKER_CONFIG/config.json" 2>/dev/null || { echo "✗ no ghcr.io login in \$DOCKER_CONFIG after 300s"; exit 1; }
+for img in $*; do
+    (out=\$(docker pull -q "\$img" 2>&1) && echo "✓ \$img" || { echo "✗ \$img: \$out"; exit 1; }) &
 done
+rc=0
+for job in \$(jobs -p); do wait "\$job" || rc=1; done
+exit \$rc
+EOF
+)
+    aws ssm send-command --profile "$PROFILE" \
+        --instance-ids "$instance_id" \
+        --document-name AWS-RunShellScript \
+        --comment "aws-scale-up image pre-pull" \
+        --parameters "$(jq -n --arg c "$script" '{commands: [$c], executionTimeout: ["1800"]}')" \
+        --query 'Command.CommandId' --output text
+}
+
+# Poll SSM command invocations (one "command_id instance_id label" arg each) until all finish
+wait_for_prepulls() {
+    local failed=0
+
+    while [ "$#" -gt 0 ]; do
+        sleep 10
+        local still_pending=()
+        for prepull in "$@"; do
+            read -r command_id instance_id label <<< "$prepull"
+            invocation=$(aws ssm get-command-invocation --profile "$PROFILE" \
+                --command-id "$command_id" --instance-id "$instance_id" \
+                --output json 2>/dev/null || echo '{"Status": "Pending"}')
+            status=$(jq -r .Status <<< "$invocation")
+            case "$status" in
+                Pending|InProgress|Delayed)
+                    still_pending+=("$prepull")
+                    ;;
+                *)
+                    echo "[$label] $status"
+                    jq -r '.StandardOutputContent // ""' <<< "$invocation" | sed '/^$/d; s/^/    /'
+                    [ "$status" = "Success" ] || failed=1
+                    ;;
+            esac
+        done
+        set -- "${still_pending[@]}"
+    done
+
+    return $failed
+}
+
+if [ -n "$MANAGER_ASG" ]; then
+    scale_up_asg "$MANAGER_ASG"
+    echo "Waiting for $MANAGER_ASG to have a running instance..."
+    poll_until "$MANAGER_ASG to become InService" asg_instance_in_service "$MANAGER_ASG" > /dev/null
+    echo "✓ $MANAGER_ASG is InService"
+else
+    echo "Warning: no manager ASG found for env ${ENV}, skipping manager wait" >&2
+fi
+echo ""
+
+while read -r asg_name _; do
+    scale_up_asg "$asg_name"
+done <<< "$PROC_ASG_INFO"
 
 echo ""
 echo "Scale up complete!"
+
+[ "$PULL_IMAGES" = true ] || exit 0
+
+echo ""
+echo "Looking up job images from the ${ENV} api task definition..."
+if ! JOB_IMAGES=$(get_job_images) || [ -z "$JOB_IMAGES" ]; then
+    echo "✗ Could not read *_DOCKER_IMAGE settings for ${ENV}; skipping image pre-pull" >&2
+    exit 1
+fi
+echo "$JOB_IMAGES" | sed 's/^/  /'
+echo ""
+
+PREPULLS=()
+while read -r asg_name role; do
+    images=""
+    for var in $(role_image_vars "$role"); do
+        image=$(echo "$JOB_IMAGES" | awk -v var="$var" '$1 == var {print $2}')
+        [ -n "$image" ] && images+="$image "
+    done
+    [ -n "$images" ] || continue
+
+    instance_id=$(poll_until "$asg_name to become InService" asg_instance_in_service "$asg_name") || continue
+    poll_until "SSM agent on $instance_id" ssm_agent_online "$instance_id" || continue
+    command_id=$(send_prepull "$instance_id" $images)
+    echo "Pre-pulling on $role ($instance_id): $images"
+    PREPULLS+=("$command_id $instance_id $role")
+done <<< "$PROC_ASG_INFO"
+
+if [ "${#PREPULLS[@]}" -eq 0 ]; then
+    echo "✗ No proc nodes reachable for image pre-pull" >&2
+    exit 1
+fi
+
+echo ""
+echo "Waiting for image pulls to finish..."
+if wait_for_prepulls "${PREPULLS[@]}"; then
+    echo ""
+    echo "✓ Images pre-pulled on all proc nodes"
+else
+    echo ""
+    echo "✗ Some image pulls failed; first jobs on those nodes will pull on demand" >&2
+    exit 1
+fi

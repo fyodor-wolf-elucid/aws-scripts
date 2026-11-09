@@ -117,21 +117,24 @@ aws-get-case ip-ffr case-2024 --checksums            # Use rsync with checksums 
 
 ### aws-scale-up
 
-Scale up Auto Scaling groups to 1 instance (min-size=1, max-size=1, desired-capacity=1).
+Scale up Auto Scaling groups to 1 instance (min-size=1, max-size=1, desired-capacity=1). The manager comes up first, then the proc nodes.
+
+Once the proc nodes are InService, the script pre-pulls the env's job images onto them over SSM, so the first condor job of the day doesn't wait on a multi-GB pull. Image tags come from the `*_DOCKER_IMAGE` settings on the env's `api` ECS task definition. Each node pulls only the images its slots run (proc-render: pro; proc-vc-inf: composition, inference; proc-bg: nrrd, composition, inference, vessel-inference).
 
 **Usage:**
 ```bash
-aws-scale-up <env>
+aws-scale-up <env> [--no-pull]
 ```
 
 **Examples:**
 ```bash
-aws-scale-up fyodor-wolf-elucid    # Scale up all matching ASGs
+aws-scale-up fyodor-wolf-elucid              # Scale up and pre-pull job images
+aws-scale-up fyodor-wolf-elucid --no-pull    # Scale up only
 ```
 
 **Filters:**
 - `env` tag must match the provided environment name
-- `Attributes` tag must be one of: `proc-bg`, `proc-vc-inf`, or `proc-render`
+- `Attributes` tag must be one of: `manager`, `proc-bg`, `proc-vc-inf`, or `proc-render`
 
 ### aws-scale-down
 
