@@ -24,7 +24,7 @@ PROFILE="${AWS_PROFILE:-default}"
 check_aws_auth "$PROFILE"
 
 echo "Fetching Auto Scaling groups with env tag: ${ENV}"
-echo "Looking for Attributes: proc-bg, proc-vc-inf, proc-render"
+echo "Looking for Attributes: manager, proc-bg, proc-vc-inf, proc-render"
 echo ""
 
 # Get all ASGs and filter by tags
@@ -32,13 +32,13 @@ ASG_NAMES=$(aws autoscaling describe-auto-scaling-groups \
     --profile "$PROFILE" \
     --query "AutoScalingGroups[*].[AutoScalingGroupName, Tags[?Key=='env'].Value | [0], Tags[?Key=='Attributes'].Value | [0]]" \
     --output text | \
-    awk -v env="$ENV" '$2 == env && ($3 == "proc-bg" || $3 == "proc-vc-inf" || $3 == "proc-render") {print $1}' | \
+    awk -v env="$ENV" '$2 == env && ($3 == "manager" || $3 == "proc-bg" || $3 == "proc-vc-inf" || $3 == "proc-render") {print $1}' | \
     sort)
 
 if [ -z "$ASG_NAMES" ]; then
     echo "No Auto Scaling groups found with:"
     echo "  - env tag: ${ENV}"
-    echo "  - Attributes tag: proc-bg, proc-vc-inf, or proc-render"
+    echo "  - Attributes tag: manager, proc-bg, proc-vc-inf, or proc-render"
     exit 1
 fi
 

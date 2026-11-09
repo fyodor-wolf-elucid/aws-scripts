@@ -152,7 +152,7 @@ aws-scale-down fyodor-wolf-elucid  # Scale down all matching ASGs
 
 **Filters:**
 - `env` tag must match the provided environment name
-- `Attributes` tag must be one of: `proc-bg`, `proc-vc-inf`, or `proc-render`
+- `Attributes` tag must be one of: `manager`, `proc-bg`, `proc-vc-inf`, or `proc-render`
 
 ### aws-ecs-check
 
